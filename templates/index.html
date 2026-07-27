@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>COMP5 Native Embedder</title>
+<style>
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{font-family:Arial, Helvetica, sans-serif; background:#f4f5f7; color:#1f2430; min-height:100vh;}
+  header{background:#6e1e2a; color:#fff; padding:18px 28px;}
+  header h1{font-size:20px; letter-spacing:.3px;}
+  header p{font-size:12px; color:#e6cdd2; margin-top:3px;}
+  .wrap{max-width:860px; margin:28px auto; padding:0 16px;}
+
+  .modes{display:flex; gap:12px; margin-bottom:18px;}
+  .mode{flex:1; background:#fff; border:2px solid #c9ced6; border-radius:10px;
+        padding:16px; cursor:pointer; text-align:center; transition:.15s;}
+  .mode:hover{border-color:#6e1e2a;}
+  .mode.active{border-color:#6e1e2a; background:#fdf7f8; box-shadow:0 2px 8px rgba(110,30,42,.15);}
+  .mode h3{font-size:15px; color:#6e1e2a; margin-bottom:6px;}
+  .mode p{font-size:12px; color:#667;}
+
+  .dz{background:#fff; border:2px dashed #c9ced6; border-radius:10px;
+      padding:44px 20px; text-align:center; cursor:pointer; transition:.15s;}
+  .dz.drag{border-color:#6e1e2a; background:#fdf7f8;}
+  .dz .big{font-size:15px; font-weight:bold; color:#333; margin-bottom:6px;}
+  .dz .small{font-size:12px; color:#889;}
+
+  .filelist{margin-top:14px; font-size:13px;}
+  .filelist div{background:#fff; border:1px solid #dde; border-radius:6px;
+                padding:8px 12px; margin-bottom:6px; display:flex; justify-content:space-between;}
+  .filelist span.size{color:#889; font-size:12px;}
+
+  .actions{margin-top:16px; display:flex; gap:10px; align-items:center;}
+  button.go{background:#6e1e2a; color:#fff; border:none; border-radius:8px;
+            padding:12px 26px; font-size:14px; font-weight:bold; cursor:pointer;}
+  button.go:hover{background:#5a1722;}
+  button.go:disabled{background:#b9a0a5; cursor:not-allowed;}
+  button.clear{background:#fff; color:#6e1e2a; border:1px solid #6e1e2a;
+               border-radius:8px; padding:12px 18px; font-size:13px; cursor:pointer;}
+  .status{margin-top:14px; font-size:13px;}
+  .results{margin-top:12px;}
+  .results div{border-radius:6px; padding:8px 12px; margin-bottom:6px; font-size:13px;}
+  .results .ok{background:#eef7ee; border:1px solid #bfe0bf; color:#245c24;}
+  .results .warn{background:#fdf6e7; border:1px solid #e8d5a3; color:#7a5a12;}
+  .results .error{background:#fbeeee; border:1px solid #e5bcbc; color:#7a2222;}
+  .spinner{display:inline-block; width:16px; height:16px; border:3px solid #e2c7cc;
+           border-top-color:#6e1e2a; border-radius:50%; animation:spin .8s linear infinite;
+           vertical-align:middle; margin-right:8px;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  footer{max-width:860px; margin:30px auto 20px; padding:0 16px; font-size:11px; color:#99a;}
+</style>
+</head>
+<body>
+<header>
+  <h1>COMP5 Native Embedder</h1>
+  <p>Embed native files inside PDFs &nbsp;|&nbsp; Extract natives back to ZIP</p>
+</header>
+
+<div class="wrap">
+  <div class="modes">
+    <div class="mode active" id="modeEmbed">
+      <h3>EMBED &nbsp;&nbsp;ZIP &rarr; PDF</h3>
+      <p>Upload ZIP(s) containing one PDF + native files.<br>Master ZIPs (ZIP of document ZIPs) are auto-detected.</p>
+    </div>
+    <div class="mode" id="modeExtract">
+      <h3>EXTRACT &nbsp;&nbsp;PDF &rarr; ZIP</h3>
+      <p>Upload commented PDF(s) with embedded natives.<br>Get back a ZIP: clean PDF + natives + verification log.</p>
+    </div>
+  </div>
+
+  <div class="dz" id="dz">
+    <div class="big" id="dzTitle">Drop ZIP files here or click to browse</div>
+    <div class="small" id="dzHint">Multiple files allowed &middot; max 300 MB total</div>
+  </div>
+  <!-- input kept OUTSIDE the drop zone div (Windows drop-zone fix) -->
+  <input type="file" id="fileInput" multiple accept=".zip" style="display:none">
+
+  <div class="filelist" id="fileList"></div>
+
+  <div class="actions">
+    <button class="go" id="goBtn" disabled>Process Files</button>
+    <button class="clear" id="clearBtn">Clear</button>
+  </div>
+
+  <div class="status" id="status"></div>
+  <div class="results" id="results"></div>
+</div>
+
+<footer>Prepared by: Khalid Sajjad &middot; For Internal Use Only &middot; COMP5 EPC of NFPS Offshore Compression Complexes</footer>
+
+<script>
+// global guards so browser never opens dropped files
+document.addEventListener('dragover', function(e){ e.preventDefault(); });
+document.addEventListener('drop', function(e){ e.preventDefault(); });
+
+var mode = 'embed';
+var files = [];
+
+var dz = document.getElementById('dz');
+var input = document.getElementById('fileInput');
+var fileList = document.getElementById('fileList');
+var goBtn = document.getElementById('goBtn');
+var clearBtn = document.getElementById('clearBtn');
+var statusEl = document.getElementById('status');
+var resultsEl = document.getElementById('results');
+var modeEmbed = document.getElementById('modeEmbed');
+var modeExtract = document.getElementById('modeExtract');
+
+function setMode(m){
+  mode = m;
+  modeEmbed.classList.toggle('active', m === 'embed');
+  modeExtract.classList.toggle('active', m === 'extract');
+  document.getElementById('dzTitle').textContent =
+    m === 'embed' ? 'Drop ZIP files here or click to browse'
+                  : 'Drop PDF files here or click to browse';
+  input.setAttribute('accept', m === 'embed' ? '.zip' : '.pdf');
+  clearAll();
+}
+modeEmbed.onclick = function(){ setMode('embed'); };
+modeExtract.onclick = function(){ setMode('extract'); };
+
+dz.onclick = function(){ input.click(); };
+dz.addEventListener('dragover', function(e){ e.preventDefault(); dz.classList.add('drag'); });
+dz.addEventListener('dragleave', function(){ dz.classList.remove('drag'); });
+dz.addEventListener('drop', function(e){
+  e.preventDefault(); dz.classList.remove('drag');
+  addFiles(e.dataTransfer.files);
+});
+input.onchange = function(){ addFiles(input.files); input.value = ''; };
+
+function addFiles(list){
+  var want = mode === 'embed' ? '.zip' : '.pdf';
+  for (var i = 0; i < list.length; i++){
+    var f = list[i];
+    if (f.name.toLowerCase().slice(-4) !== want){
+      statusEl.textContent = f.name + ' skipped - ' + mode.toUpperCase() + ' mode accepts ' + want + ' only.';
+      continue;
+    }
+    files.push(f);
+  }
+  renderList();
+}
+
+function renderList(){
+  fileList.innerHTML = '';
+  files.forEach(function(f){
+    var d = document.createElement('div');
+    var n = document.createElement('span'); n.textContent = f.name;
+    var s = document.createElement('span'); s.className = 'size';
+    s.textContent = (f.size / 1048576).toFixed(2) + ' MB';
+    d.appendChild(n); d.appendChild(s);
+    fileList.appendChild(d);
+  });
+  goBtn.disabled = files.length === 0;
+}
+
+function clearAll(){
+  files = []; renderList();
+  statusEl.textContent = ''; resultsEl.innerHTML = '';
+}
+clearBtn.onclick = clearAll;
+
+goBtn.onclick = function(){
+  if (!files.length) return;
+  goBtn.disabled = true;
+  resultsEl.innerHTML = '';
+  statusEl.innerHTML = '<span class="spinner"></span>Processing ' + files.length + ' file(s)...';
+
+  var fd = new FormData();
+  fd.append('mode', mode);
+  files.forEach(function(f){ fd.append('files', f, f.name); });
+
+  fetch('/api/process', { method: 'POST', body: fd })
+    .then(function(resp){
+      if (!resp.ok){
+        return resp.json().then(function(j){
+          throw { msg: j.error || ('Server error ' + resp.status), results: j.results || [] };
+        });
+      }
+      var fname = decodeURIComponent(resp.headers.get('X-Filename') || 'output.bin');
+      var resHdr = resp.headers.get('X-Results');
+      var results = [];
+      if (resHdr){
+        try { results = JSON.parse(atob(resHdr)); } catch(e){}
+      }
+      return resp.blob().then(function(blob){
+        return { blob: blob, fname: fname, results: results };
+      });
+    })
+    .then(function(out){
+      var url = URL.createObjectURL(out.blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = out.fname;
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      statusEl.textContent = 'Done - downloaded ' + out.fname;
+      showResults(out.results);
+      goBtn.disabled = false;
+    })
+    .catch(function(err){
+      statusEl.textContent = 'Failed: ' + (err.msg || err.message || err);
+      showResults(err.results || []);
+      goBtn.disabled = false;
+    });
+};
+
+function showResults(results){
+  resultsEl.innerHTML = '';
+  (results || []).forEach(function(r){
+    var d = document.createElement('div');
+    d.className = r.status === 'ok' ? 'ok' : (r.status === 'warn' ? 'warn' : 'error');
+    d.textContent = r.file + ' - ' + r.detail;
+    resultsEl.appendChild(d);
+  });
+}
+</script>
+</body>
+</html>
