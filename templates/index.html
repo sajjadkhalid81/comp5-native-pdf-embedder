@@ -161,17 +161,22 @@ function clearAll(){
 }
 clearBtn.onclick = clearAll;
 
+// One request per file, so the server's existing single-output code path
+// (no bundling) always applies - each response is one PDF/ZIP that downloads
+// on its own, no wrapper ZIP.
 goBtn.onclick = function(){
   if (!files.length) return;
   goBtn.disabled = true;
   resultsEl.innerHTML = '';
-  statusEl.innerHTML = '<span class="spinner"></span>Processing ' + files.length + ' file(s)...';
+  processAll();
+};
 
+function processOne(f){
   var fd = new FormData();
   fd.append('mode', mode);
-  files.forEach(function(f){ fd.append('files', f, f.name); });
+  fd.append('files', f, f.name);
 
-  fetch('/api/process', { method: 'POST', body: fd })
+  return fetch('/api/process', { method: 'POST', body: fd })
     .then(function(resp){
       if (!resp.ok){
         return resp.json().then(function(j){
@@ -195,19 +200,39 @@ goBtn.onclick = function(){
       document.body.appendChild(a); a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      statusEl.textContent = 'Done - downloaded ' + out.fname;
-      showResults(out.results);
-      goBtn.disabled = false;
+      showResults(out.results, true);
+      return true;
     })
     .catch(function(err){
-      statusEl.textContent = 'Failed: ' + (err.msg || err.message || err);
-      showResults(err.results || []);
-      goBtn.disabled = false;
+      var results = (err.results && err.results.length)
+        ? err.results
+        : [{ file: f.name, status: 'error', detail: err.msg || err.message || String(err) }];
+      showResults(results, true);
+      return false;
     });
-};
+}
 
-function showResults(results){
-  resultsEl.innerHTML = '';
+function processAll(){
+  var i = 0, okCount = 0, failCount = 0;
+  function next(){
+    if (i >= files.length){
+      statusEl.textContent = 'Done - ' + okCount + ' file(s) downloaded' +
+        (failCount ? (', ' + failCount + ' failed.') : '.');
+      goBtn.disabled = false;
+      return;
+    }
+    var f = files[i++];
+    statusEl.innerHTML = '<span class="spinner"></span>Processing ' + i + ' / ' + files.length + ': ' + f.name + '...';
+    processOne(f).then(function(ok){
+      if (ok) okCount++; else failCount++;
+      next();
+    });
+  }
+  next();
+}
+
+function showResults(results, append){
+  if (!append) resultsEl.innerHTML = '';
   (results || []).forEach(function(r){
     var d = document.createElement('div');
     d.className = r.status === 'ok' ? 'ok' : (r.status === 'warn' ? 'warn' : 'error');
