@@ -17,11 +17,19 @@ PDF's own cover page - the PDF is never opened with pikepdf and never
 re-saved, so any natives already embedded in it are left completely intact.
 Revision comes from the filename (…_{REV}.pdf).
 
-The Return Code is looked up from an uploaded tracker Excel: any sheet with
-a "Document Number" column and a "...Review Outcome" column (e.g. "Saipem
-Review Outcome") is scanned; the row matching the PDF's Document No. gives
-the outcome text (e.g. "Code D - Rejected"), from which the return code
-letter is parsed.
+The Return Code is looked up from an uploaded tracker Excel. Two formats
+are recognised, auto-detected by header row (searched within the first 20
+rows of each sheet, so export-metadata rows above the real header are
+skipped):
+  - Aconex "Workflow Search Export To Excel" (the trained format): columns
+    Document No., Document Revision, Document Title, Step Outcome.
+  - Any other tracker with a Document Number/No. column and a
+    "...Review Outcome" column (e.g. the older "Saipem Review Outcome").
+Rows are matched to the PDF by (Document No., Revision) when a revision
+column exists; if there's no exact-revision row, it falls back to any row
+for that Document No. and flags the revision mismatch. Multiple rows for
+the same key with different outcomes are treated as ambiguous and skipped
+with an error rather than guessed.
 
 Reviewer Group (CONTRACTOR REVIEW CODE / who reviewed it) isn't in the
 tracker and can't be reliably inferred from the PDF's Discipline field
@@ -118,13 +126,23 @@ def extract_cover_page(pdf_bytes: bytes, filename: str):
 # ----------------------------------------------------------- tracker read
 
 _DOC_NO_HEADERS = {"document number", "document no", "document no."}
-_OUTCOME_HEADER_HINT = "review outcome"
-_EXTRA_HEADER_HINTS = {"revision status", "remark", "remarks"}
+_OUTCOME_HEADER_HINTS = ("step outcome", "review outcome")
+_REVISION_HEADERS = {"document revision", "revision"}
+_TITLE_HEADERS = {"document title", "title"}
+_EXTRA_HEADER_HINTS = {"revision status", "remark", "remarks", "step status", "workflow status"}
+
+_HEADER_SCAN_ROWS = 20  # Aconex "Workflow Search Export" has ~9 metadata rows before the real header
+
+
+def _norm_header(v):
+    return _clean(str(v)).lower().rstrip(".") if v is not None else ""
 
 
 def parse_tracker(tracker_bytes: bytes, tracker_filename: str):
-    """Scan every sheet for a header row with a Document Number column and
-    a "...Review Outcome" column. Returns {doc_no: {"outcome": str, "extra": [str]}}."""
+    """Scan every sheet for a header row with a Document No./Number column
+    and a Step/Review Outcome column (Document Revision / Document Title /
+    extra columns are picked up if present). Returns
+    {doc_no: [{"revision": str, "outcome": str, "extra": [str]}, ...]}."""
     try:
         wb = openpyxl.load_workbook(io.BytesIO(tracker_bytes), data_only=True)
     except Exception as e:
@@ -135,9 +153,11 @@ def parse_tracker(tracker_bytes: bytes, tracker_filename: str):
 
     for ws in wb.worksheets:
         header_row = None
-        for row in ws.iter_rows(min_row=1, max_row=min(5, ws.max_row)):
-            headers = [_clean(str(c.value)).lower() if c.value is not None else "" for c in row]
-            if any(h in _DOC_NO_HEADERS for h in headers) and any(_OUTCOME_HEADER_HINT in h for h in headers):
+        for row in ws.iter_rows(min_row=1, max_row=min(_HEADER_SCAN_ROWS, ws.max_row)):
+            headers = [_norm_header(c.value) for c in row]
+            has_doc_no = any(h.rstrip(".") in _DOC_NO_HEADERS for h in headers)
+            has_outcome = any(any(hint in h for hint in _OUTCOME_HEADER_HINTS) for h in headers)
+            if has_doc_no and has_outcome:
                 header_row = row[0].row
                 break
         if header_row is None:
@@ -145,9 +165,11 @@ def parse_tracker(tracker_bytes: bytes, tracker_filename: str):
 
         matched_any_sheet = True
         header_cells = next(ws.iter_rows(min_row=header_row, max_row=header_row))
-        headers = [_clean(str(c.value)).lower() if c.value is not None else "" for c in header_cells]
-        doc_no_col = next(i for i, h in enumerate(headers) if h in _DOC_NO_HEADERS)
-        outcome_col = next(i for i, h in enumerate(headers) if _OUTCOME_HEADER_HINT in h)
+        headers = [_norm_header(c.value) for c in header_cells]
+        doc_no_col = next(i for i, h in enumerate(headers) if h.rstrip(".") in _DOC_NO_HEADERS)
+        outcome_col = next(i for i, h in enumerate(headers) if any(hint in h for hint in _OUTCOME_HEADER_HINTS))
+        rev_col = next((i for i, h in enumerate(headers) if h in _REVISION_HEADERS), None)
+        title_col = next((i for i, h in enumerate(headers) if h in _TITLE_HEADERS), None)
         extra_cols = [i for i, h in enumerate(headers) if h in _EXTRA_HEADER_HINTS]
 
         for row in ws.iter_rows(min_row=header_row + 1, max_row=ws.max_row):
@@ -159,19 +181,70 @@ def parse_tracker(tracker_bytes: bytes, tracker_filename: str):
             doc_no = _clean(str(doc_no_val))
             outcome_val = row[outcome_col].value if outcome_col < len(row) else None
             outcome = _clean(str(outcome_val)) if outcome_val else ""
+            if not outcome:
+                continue
+            revision = ""
+            if rev_col is not None and rev_col < len(row) and row[rev_col].value:
+                revision = _clean(str(row[rev_col].value)).upper()
+            title = ""
+            if title_col is not None and title_col < len(row) and row[title_col].value:
+                title = _clean(str(row[title_col].value))
             extra = []
             for c in extra_cols:
                 if c < len(row) and row[c].value:
                     extra.append(_clean(str(row[c].value)))
-            lookup[doc_no] = {"outcome": outcome, "extra": extra}
+            lookup.setdefault(doc_no, []).append(
+                {"revision": revision, "outcome": outcome, "title": title, "extra": extra}
+            )
 
     if not matched_any_sheet:
         raise CrsError(
-            f"{tracker_filename}: no sheet found with a 'Document Number' column and a "
-            f"'...Review Outcome' column (e.g. 'Saipem Review Outcome')."
+            f"{tracker_filename}: no sheet found with a 'Document No.' column and a "
+            f"'Step Outcome' / '...Review Outcome' column."
         )
 
     return lookup
+
+
+def match_tracker(tracker_lookup: dict, doc_no: str, rev: str):
+    """Resolve one document's tracker row(s) to a single outcome entry.
+    Returns (entry_dict, note) where note flags a revision fallback, or
+    raises CrsError if not found / ambiguous."""
+    candidates = tracker_lookup.get(doc_no)
+    if not candidates:
+        raise CrsError(f"Document No. {doc_no} not found in the tracker")
+
+    have_revisions = any(c["revision"] for c in candidates)
+    exact = [c for c in candidates if not have_revisions or c["revision"] == rev.upper()]
+    note = None
+
+    if not exact:
+        # no row for this exact revision - fall back to whatever revision(s) exist
+        outcomes = {c["outcome"] for c in candidates}
+        if len(outcomes) > 1:
+            revs = ", ".join(sorted({c["revision"] or "?" for c in candidates}))
+            raise CrsError(
+                f"Document No. {doc_no}: no tracker row for Rev {rev}, and the other revisions "
+                f"in the tracker ({revs}) have different outcomes - can't pick one automatically"
+            )
+        exact = candidates
+        revs = ", ".join(sorted({c["revision"] or "?" for c in candidates}))
+        note = f"no tracker row for Rev {rev} - using outcome from tracker Rev {revs}"
+    else:
+        outcomes = {c["outcome"] for c in exact}
+        if len(outcomes) > 1:
+            raise CrsError(
+                f"Document No. {doc_no} Rev {rev}: multiple tracker rows with different outcomes "
+                f"({'; '.join(sorted(outcomes))}) - can't pick one automatically"
+            )
+
+    chosen = exact[0]
+    extra = []
+    for c in exact:
+        for e in c["extra"]:
+            if e not in extra:
+                extra.append(e)
+    return {"outcome": chosen["outcome"], "title": chosen["title"], "extra": extra}, note
 
 
 def resolve_return_code(outcome_text: str):
@@ -229,18 +302,14 @@ def build_one(pdf_bytes: bytes, filename: str, tracker_lookup: dict):
             f"(expected …_<REV>.pdf, e.g. …_B.pdf) - skipped."
         )
 
-    entry = tracker_lookup.get(doc_no)
-    if entry is None:
-        raise CrsError(f"{filename}: Document No. {doc_no} not found in the tracker - skipped.")
-    if not entry["outcome"]:
-        raise CrsError(f"{filename}: Document No. {doc_no} has no review outcome value in the tracker - skipped.")
-
     try:
+        entry, rev_note = match_tracker(tracker_lookup, doc_no, rev)
         return_code = resolve_return_code(entry["outcome"])
     except CrsError as e:
         raise CrsError(f"{filename}: {e} - skipped.")
 
-    xlsx_bytes = fill_crs(doc_no, rev, info["doc_class"], info["title"], return_code)
+    title = entry["title"] or info["title"]  # tracker's own title is more reliable when present
+    xlsx_bytes = fill_crs(doc_no, rev, info["doc_class"], title, return_code)
 
     pdf_out_name = f"{doc_no}_{rev}.pdf"
     xlsx_out_name = f"CTR CRS - Aconex_{doc_no}_{rev}.xlsx"
@@ -254,6 +323,8 @@ def build_one(pdf_bytes: bytes, filename: str, tracker_lookup: dict):
 
     detail = (f"Tracker outcome '{entry['outcome']}' -> return code {return_code} "
               f"(Doc Class {info['doc_class'] or '?'}), zipped as {zip_name}")
+    if rev_note:
+        detail += " | ATTENTION: " + rev_note
     if entry["extra"]:
         detail += " | tracker notes: " + "; ".join(entry["extra"])
     detail += " | ATTENTION: reviewer group (CONTRACTOR REVIEW CODE) left as template default - verify/set manually before sending"
