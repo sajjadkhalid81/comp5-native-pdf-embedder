@@ -56,9 +56,16 @@
   .crsOpts .row{display:flex; gap:14px; margin-bottom:10px; flex-wrap:wrap;}
   .crsOpts .field{flex:1; min-width:220px;}
   .crsOpts label{display:block; font-size:12px; font-weight:bold; color:#556; margin-bottom:5px;}
-  .crsOpts select, .crsOpts input[type=text], .crsOpts input[type=file]{
+  .crsOpts select, .crsOpts input[type=text]{
     width:100%; padding:9px 10px; border:1px solid #c9ced6; border-radius:6px; font-size:13px; background:#fff;}
   .crsOpts .hint{font-size:11px; color:#889; margin-top:4px;}
+
+  .dzSmall{background:#fff; border:2px dashed #c9ced6; border-radius:8px;
+      padding:16px; text-align:center; cursor:pointer; transition:.15s;}
+  .dzSmall.drag{border-color:#6e1e2a; background:#fdf7f8;}
+  .dzSmall.filled{border-style:solid; border-color:#8fbf8f; background:#f3faf3;}
+  .dzSmall .big{font-size:13px; font-weight:bold; color:#333;}
+  .dzSmall .small{font-size:11px; color:#889; margin-top:2px;}
 </style>
 </head>
 <body>
@@ -86,9 +93,13 @@
   <div class="crsOpts" id="crsOpts" style="display:none">
     <div class="row">
       <div class="field">
-        <label for="crsTracker">Tracker Excel (Document Number + Review Outcome columns)</label>
-        <input type="file" id="crsTracker" accept=".xlsx,.xlsm">
-        <div class="hint" id="crsTrackerName">No file selected.</div>
+        <label for="crsTrackerDz">Tracker Excel (Document No. + Review Outcome columns)</label>
+        <div class="dzSmall" id="crsTrackerDz">
+          <div class="big" id="crsTrackerDzTitle">Drop tracker Excel here or click to browse</div>
+          <div class="small" id="crsTrackerName">No file selected &middot; .xlsx / .xlsm</div>
+        </div>
+        <!-- input kept OUTSIDE the drop zone div (Windows drop-zone fix) -->
+        <input type="file" id="crsTracker" accept=".xlsx,.xlsm" style="display:none">
       </div>
     </div>
     <div class="hint">Document No., Revision, Document Class and Title are auto-extracted from each PDF's own cover page / filename (…_&lt;REV&gt;.pdf). Return code is looked up per document from the tracker by Document Number. Contractor Reviewer Group is left as the template default - check/set it in the generated file before sending.</div>
@@ -135,10 +146,31 @@ var modeCrs = document.getElementById('modeCrs');
 var crsOpts = document.getElementById('crsOpts');
 var crsTracker = document.getElementById('crsTracker');
 var crsTrackerName = document.getElementById('crsTrackerName');
-crsTracker.onchange = function(){
-  crsTrackerName.textContent = crsTracker.files.length ? crsTracker.files[0].name : 'No file selected.';
+var crsTrackerDz = document.getElementById('crsTrackerDz');
+
+function setTrackerFile(file){
+  if (!file) return;
+  var low = file.name.toLowerCase();
+  if (low.slice(-5) !== '.xlsx' && low.slice(-5) !== '.xlsm'){
+    statusEl.textContent = file.name + ' skipped - tracker must be .xlsx or .xlsm.';
+    return;
+  }
+  var dt = new DataTransfer();
+  dt.items.add(file);
+  crsTracker.files = dt.files;
+  crsTrackerName.textContent = file.name + ' (' + (file.size / 1048576).toFixed(2) + ' MB)';
+  crsTrackerDz.classList.add('filled');
   renderList();
-};
+}
+
+crsTracker.onchange = function(){ setTrackerFile(crsTracker.files[0]); };
+crsTrackerDz.onclick = function(){ crsTracker.click(); };
+crsTrackerDz.addEventListener('dragover', function(e){ e.preventDefault(); crsTrackerDz.classList.add('drag'); });
+crsTrackerDz.addEventListener('dragleave', function(){ crsTrackerDz.classList.remove('drag'); });
+crsTrackerDz.addEventListener('drop', function(e){
+  e.preventDefault(); crsTrackerDz.classList.remove('drag');
+  if (e.dataTransfer.files.length) setTrackerFile(e.dataTransfer.files[0]);
+});
 
 function setMode(m){
   mode = m;
