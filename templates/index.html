@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>COMP5 Native Embedder</title>
+<!-- version: crs-mode-1 -->
+
 <style>
   *{box-sizing:border-box; margin:0; padding:0;}
   body{font-family:Arial, Helvetica, sans-serif; background:#f4f5f7; color:#1f2430; min-height:100vh;}
@@ -49,12 +51,20 @@
            vertical-align:middle; margin-right:8px;}
   @keyframes spin{to{transform:rotate(360deg);}}
   footer{max-width:860px; margin:30px auto 20px; padding:0 16px; font-size:11px; color:#99a;}
+
+  .crsOpts{background:#fff; border:1px solid #dde; border-radius:10px; padding:16px; margin-bottom:18px;}
+  .crsOpts .row{display:flex; gap:14px; margin-bottom:10px; flex-wrap:wrap;}
+  .crsOpts .field{flex:1; min-width:220px;}
+  .crsOpts label{display:block; font-size:12px; font-weight:bold; color:#556; margin-bottom:5px;}
+  .crsOpts select, .crsOpts input[type=text]{
+    width:100%; padding:9px 10px; border:1px solid #c9ced6; border-radius:6px; font-size:13px;}
+  .crsOpts .hint{font-size:11px; color:#889; margin-top:4px;}
 </style>
 </head>
 <body>
 <header>
   <h1>COMP5 Native Embedder</h1>
-  <p>Embed native files inside PDFs &nbsp;|&nbsp; Extract natives back to ZIP</p>
+  <p>Embed native files inside PDFs &nbsp;|&nbsp; Extract natives back to ZIP &nbsp;|&nbsp; Fill missing CRS &amp; zip</p>
 </header>
 
 <div class="wrap">
@@ -67,6 +77,31 @@
       <h3>EXTRACT &nbsp;&nbsp;PDF &rarr; ZIP</h3>
       <p>Upload commented PDF(s) with embedded natives.<br>Get back a ZIP: clean PDF + natives + verification log.</p>
     </div>
+    <div class="mode" id="modeCrs">
+      <h3>CRS &nbsp;&nbsp;PDF &rarr; ZIP</h3>
+      <p>No CRS from the discipline engineer? Upload PDF(s).<br>Get back a ZIP per doc: untouched PDF + filled CTR CRS.</p>
+    </div>
+  </div>
+
+  <div class="crsOpts" id="crsOpts" style="display:none">
+    <div class="row">
+      <div class="field">
+        <label for="crsReturnCode">Return Code (applies to this whole batch)</label>
+        <select id="crsReturnCode">
+          <option value="">Select return code...</option>
+          <option value="A">A - Approved/Reviewed with no comments</option>
+          <option value="B">B - Approved/Reviewed with minor comments</option>
+          <option value="C">C - Returned with comments</option>
+          <option value="D">D - Rejected</option>
+          <option value="I">I - Information only / No Review</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="crsReviewerGroup">Contractor Reviewer Group (optional)</label>
+        <input type="text" id="crsReviewerGroup" placeholder="e.g. COMP5_STATIC SAIPEM">
+      </div>
+    </div>
+    <div class="hint">Document No., Revision, Document Class and Title are auto-extracted from each PDF's own cover page / filename (…_&lt;REV&gt;.pdf). Review the results below after generating.</div>
   </div>
 
   <div class="dz" id="dz">
@@ -106,11 +141,17 @@ var statusEl = document.getElementById('status');
 var resultsEl = document.getElementById('results');
 var modeEmbed = document.getElementById('modeEmbed');
 var modeExtract = document.getElementById('modeExtract');
+var modeCrs = document.getElementById('modeCrs');
+var crsOpts = document.getElementById('crsOpts');
+var crsReturnCode = document.getElementById('crsReturnCode');
+var crsReviewerGroup = document.getElementById('crsReviewerGroup');
 
 function setMode(m){
   mode = m;
   modeEmbed.classList.toggle('active', m === 'embed');
   modeExtract.classList.toggle('active', m === 'extract');
+  modeCrs.classList.toggle('active', m === 'crs');
+  crsOpts.style.display = m === 'crs' ? 'block' : 'none';
   document.getElementById('dzTitle').textContent =
     m === 'embed' ? 'Drop ZIP files here or click to browse'
                   : 'Drop PDF files here or click to browse';
@@ -119,6 +160,8 @@ function setMode(m){
 }
 modeEmbed.onclick = function(){ setMode('embed'); };
 modeExtract.onclick = function(){ setMode('extract'); };
+modeCrs.onclick = function(){ setMode('crs'); };
+crsReturnCode.onchange = function(){ renderList(); };
 
 dz.onclick = function(){ input.click(); };
 dz.addEventListener('dragover', function(e){ e.preventDefault(); dz.classList.add('drag'); });
@@ -152,7 +195,7 @@ function renderList(){
     d.appendChild(n); d.appendChild(s);
     fileList.appendChild(d);
   });
-  goBtn.disabled = files.length === 0;
+  goBtn.disabled = files.length === 0 || (mode === 'crs' && !crsReturnCode.value);
 }
 
 function clearAll(){
@@ -173,10 +216,17 @@ goBtn.onclick = function(){
 
 function processOne(f){
   var fd = new FormData();
-  fd.append('mode', mode);
+  var url = '/api/process';
+  if (mode === 'crs'){
+    url = '/api/crs';
+    fd.append('return_code', crsReturnCode.value);
+    fd.append('reviewer_group', crsReviewerGroup.value);
+  } else {
+    fd.append('mode', mode);
+  }
   fd.append('files', f, f.name);
 
-  return fetch('/api/process', { method: 'POST', body: fd })
+  return fetch(url, { method: 'POST', body: fd })
     .then(function(resp){
       if (!resp.ok){
         return resp.json().then(function(j){
