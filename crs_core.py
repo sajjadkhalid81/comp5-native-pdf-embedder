@@ -3,20 +3,31 @@ crs_core.py - COMP5 CRS Fill & Zip.
 
 For documents where the discipline engineer has not provided an Excel CRS
 (Comment Response Sheet), this fills the standard CTR CRS - Aconex template
-from each PDF's own cover page and packages it with the (untouched) PDF
-into a correctly-named ZIP.
+from each PDF's own cover page + a tracker Excel (e.g. the "Vendor DC
+Workflow" sheet), and packages it with the (untouched) PDF into a
+correctly-named ZIP.
 
 Per document:
   {DocNo}_{Rev}_CTR CRS.zip
     {DocNo}_{Rev}.pdf                          <- original PDF bytes, byte-for-byte
     CTR CRS - Aconex_{DocNo}_{Rev}.xlsx         <- filled from the template
 
-Return code and reviewer group are supplied once for the whole batch (a
-batch handed over by one discipline engineer is normally one review cycle
-with one outcome and one reviewer group), and applied to every document.
 Document No / Document Class / Document Title are auto-extracted from each
 PDF's own cover page - the PDF is never opened with pikepdf and never
 re-saved, so any natives already embedded in it are left completely intact.
+Revision comes from the filename (…_{REV}.pdf).
+
+The Return Code is looked up from an uploaded tracker Excel: any sheet with
+a "Document Number" column and a "...Review Outcome" column (e.g. "Saipem
+Review Outcome") is scanned; the row matching the PDF's Document No. gives
+the outcome text (e.g. "Code D - Rejected"), from which the return code
+letter is parsed.
+
+Reviewer Group (CONTRACTOR REVIEW CODE / who reviewed it) isn't in the
+tracker and can't be reliably inferred from the PDF's Discipline field
+alone (e.g. Mechanical can be Static or Rotating) - it is left as the
+template's own value and always flagged for manual check before the CRS
+is sent out.
 """
 import io
 import os
@@ -84,8 +95,6 @@ def extract_cover_page(pdf_bytes: bytes, filename: str):
 
     if not doc_no:
         doc_no = doc_no_from_name or stem
-    if not rev:
-        rev = ""  # left blank - flagged to the user, never guessed
 
     warnings = []
     if not doc_no:
@@ -106,9 +115,81 @@ def extract_cover_page(pdf_bytes: bytes, filename: str):
     }
 
 
+# ----------------------------------------------------------- tracker read
+
+_DOC_NO_HEADERS = {"document number", "document no", "document no."}
+_OUTCOME_HEADER_HINT = "review outcome"
+_EXTRA_HEADER_HINTS = {"revision status", "remark", "remarks"}
+
+
+def parse_tracker(tracker_bytes: bytes, tracker_filename: str):
+    """Scan every sheet for a header row with a Document Number column and
+    a "...Review Outcome" column. Returns {doc_no: {"outcome": str, "extra": [str]}}."""
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(tracker_bytes), data_only=True)
+    except Exception as e:
+        raise CrsError(f"{tracker_filename}: could not open tracker Excel ({e}).")
+
+    lookup = {}
+    matched_any_sheet = False
+
+    for ws in wb.worksheets:
+        header_row = None
+        for row in ws.iter_rows(min_row=1, max_row=min(5, ws.max_row)):
+            headers = [_clean(str(c.value)).lower() if c.value is not None else "" for c in row]
+            if any(h in _DOC_NO_HEADERS for h in headers) and any(_OUTCOME_HEADER_HINT in h for h in headers):
+                header_row = row[0].row
+                break
+        if header_row is None:
+            continue
+
+        matched_any_sheet = True
+        header_cells = next(ws.iter_rows(min_row=header_row, max_row=header_row))
+        headers = [_clean(str(c.value)).lower() if c.value is not None else "" for c in header_cells]
+        doc_no_col = next(i for i, h in enumerate(headers) if h in _DOC_NO_HEADERS)
+        outcome_col = next(i for i, h in enumerate(headers) if _OUTCOME_HEADER_HINT in h)
+        extra_cols = [i for i, h in enumerate(headers) if h in _EXTRA_HEADER_HINTS]
+
+        for row in ws.iter_rows(min_row=header_row + 1, max_row=ws.max_row):
+            if doc_no_col >= len(row):
+                continue
+            doc_no_val = row[doc_no_col].value
+            if not doc_no_val:
+                continue
+            doc_no = _clean(str(doc_no_val))
+            outcome_val = row[outcome_col].value if outcome_col < len(row) else None
+            outcome = _clean(str(outcome_val)) if outcome_val else ""
+            extra = []
+            for c in extra_cols:
+                if c < len(row) and row[c].value:
+                    extra.append(_clean(str(row[c].value)))
+            lookup[doc_no] = {"outcome": outcome, "extra": extra}
+
+    if not matched_any_sheet:
+        raise CrsError(
+            f"{tracker_filename}: no sheet found with a 'Document Number' column and a "
+            f"'...Review Outcome' column (e.g. 'Saipem Review Outcome')."
+        )
+
+    return lookup
+
+
+def resolve_return_code(outcome_text: str):
+    """'Code D - Rejected' / 'Code D' / 'D - Rejected' -> 'D'. Raises CrsError if unclear."""
+    m = re.search(r"\bCode\s*[:\-]?\s*([A-Za-z])\b", outcome_text, re.I)
+    if not m:
+        m = re.match(r"\s*([A-Za-z])\s*[-:]", outcome_text)
+    if not m:
+        raise CrsError(f"could not parse a return code letter from '{outcome_text}'")
+    code = m.group(1).upper()
+    if code not in RETURN_CODES:
+        raise CrsError(f"'{code}' parsed from '{outcome_text}' is not a valid return code (A/B/C/D/I)")
+    return code
+
+
 # ------------------------------------------------------------------ fill
 
-def fill_crs(doc_no, rev, doc_class, title, return_code, reviewer_group):
+def fill_crs(doc_no, rev, doc_class, title, return_code, reviewer_group=""):
     """Fill the CTR CRS template. Returns the .xlsx bytes."""
     if return_code not in RETURN_CODES:
         raise CrsError(f"Invalid return code '{return_code}'.")
@@ -135,7 +216,7 @@ def fill_crs(doc_no, rev, doc_class, title, return_code, reviewer_group):
 
 # --------------------------------------------------------------- per-doc
 
-def build_one(pdf_bytes: bytes, filename: str, return_code: str, reviewer_group: str):
+def build_one(pdf_bytes: bytes, filename: str, tracker_lookup: dict):
     """One PDF -> (zip_name, zip_bytes, detail_string). Raises CrsError."""
     info = extract_cover_page(pdf_bytes, filename)
     doc_no, rev = info["doc_no"], info["rev"]
@@ -148,8 +229,18 @@ def build_one(pdf_bytes: bytes, filename: str, return_code: str, reviewer_group:
             f"(expected …_<REV>.pdf, e.g. …_B.pdf) - skipped."
         )
 
-    xlsx_bytes = fill_crs(doc_no, rev, info["doc_class"], info["title"],
-                           return_code, reviewer_group)
+    entry = tracker_lookup.get(doc_no)
+    if entry is None:
+        raise CrsError(f"{filename}: Document No. {doc_no} not found in the tracker - skipped.")
+    if not entry["outcome"]:
+        raise CrsError(f"{filename}: Document No. {doc_no} has no review outcome value in the tracker - skipped.")
+
+    try:
+        return_code = resolve_return_code(entry["outcome"])
+    except CrsError as e:
+        raise CrsError(f"{filename}: {e} - skipped.")
+
+    xlsx_bytes = fill_crs(doc_no, rev, info["doc_class"], info["title"], return_code)
 
     pdf_out_name = f"{doc_no}_{rev}.pdf"
     xlsx_out_name = f"CTR CRS - Aconex_{doc_no}_{rev}.xlsx"
@@ -161,23 +252,34 @@ def build_one(pdf_bytes: bytes, filename: str, return_code: str, reviewer_group:
         z.writestr(xlsx_out_name, xlsx_bytes)
     buf.seek(0)
 
-    detail = f"CRS filled (Doc Class {info['doc_class'] or '?'}, return code {return_code}), zipped as {zip_name}"
+    detail = (f"Tracker outcome '{entry['outcome']}' -> return code {return_code} "
+              f"(Doc Class {info['doc_class'] or '?'}), zipped as {zip_name}")
+    if entry["extra"]:
+        detail += " | tracker notes: " + "; ".join(entry["extra"])
+    detail += " | ATTENTION: reviewer group (CONTRACTOR REVIEW CODE) left as template default - verify/set manually before sending"
     if info["warnings"]:
-        detail += " | ATTENTION: " + "; ".join(w for w in info["warnings"] if "Document No" not in w and "Revision" not in w)
+        extra_w = [w for w in info["warnings"] if "Document No" not in w and "Revision" not in w]
+        if extra_w:
+            detail += "; " + "; ".join(extra_w)
 
     return zip_name, buf.getvalue(), detail
 
 
 # ------------------------------------------------------------------ batch
 
-def process_batch(files, return_code, reviewer_group):
-    """files: list of (filename, bytes). Returns (out_filename, out_bytes, results)."""
+def process_batch(files, tracker_bytes, tracker_filename):
+    """files: list of (filename, bytes) - PDFs only.
+    Returns (out_filename, out_bytes, results)."""
+    try:
+        tracker_lookup = parse_tracker(tracker_bytes, tracker_filename)
+    except CrsError as e:
+        return None, None, [{"file": tracker_filename, "status": "error", "detail": str(e)}]
+
     outputs, results = [], []
     for fname, fbytes in files:
         try:
-            zip_name, zip_bytes, detail = build_one(fbytes, fname, return_code, reviewer_group)
-            st = "warn" if "ATTENTION" in detail else "ok"
-            results.append({"file": fname, "status": st, "detail": detail})
+            zip_name, zip_bytes, detail = build_one(fbytes, fname, tracker_lookup)
+            results.append({"file": fname, "status": "warn", "detail": detail})  # always warn: reviewer group needs a manual check
             outputs.append((zip_name, zip_bytes))
         except CrsError as e:
             results.append({"file": fname, "status": "error", "detail": str(e)})

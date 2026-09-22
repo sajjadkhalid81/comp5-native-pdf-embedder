@@ -13,7 +13,7 @@ from urllib.parse import quote
 from flask import Flask, render_template, request, jsonify, send_file
 
 from native_core import process_batch
-from crs_core import process_batch as crs_process_batch, RETURN_CODES
+from crs_core import process_batch as crs_process_batch
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 300 * 1024 * 1024  # 300 MB
@@ -75,21 +75,23 @@ def process():
 
 @app.route("/api/crs", methods=["POST"])
 def crs():
-    return_code = request.form.get("return_code", "").strip().upper()
-    reviewer_group = request.form.get("reviewer_group", "").strip()
-
-    if return_code not in RETURN_CODES:
-        return jsonify({"error": "Please select a return code."}), 400
+    tracker = request.files.get("tracker")
+    if not tracker or not tracker.filename:
+        return jsonify({"error": "Please upload the tracker Excel (with Document Number + Review Outcome columns)."}), 400
+    if not tracker.filename.lower().endswith((".xlsx", ".xlsm")):
+        return jsonify({"error": f"{tracker.filename}: tracker must be an Excel file (.xlsx)."}), 400
+    tracker_bytes = tracker.read()
+    tracker_filename = tracker.filename
 
     files = _read_uploads()
     if not files:
-        return jsonify({"error": "No files uploaded."}), 400
+        return jsonify({"error": "No PDF files uploaded."}), 400
 
     for fname, _ in files:
         if not fname.lower().endswith(".pdf"):
             return jsonify({"error": f"{fname}: CRS mode expects PDF files only."}), 400
 
-    out_name, out_bytes, results = crs_process_batch(files, return_code, reviewer_group)
+    out_name, out_bytes, results = crs_process_batch(files, tracker_bytes, tracker_filename)
 
     if out_bytes is None:
         return jsonify({"error": "All files failed.", "results": results}), 422

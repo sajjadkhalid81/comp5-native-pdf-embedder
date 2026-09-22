@@ -56,8 +56,8 @@
   .crsOpts .row{display:flex; gap:14px; margin-bottom:10px; flex-wrap:wrap;}
   .crsOpts .field{flex:1; min-width:220px;}
   .crsOpts label{display:block; font-size:12px; font-weight:bold; color:#556; margin-bottom:5px;}
-  .crsOpts select, .crsOpts input[type=text]{
-    width:100%; padding:9px 10px; border:1px solid #c9ced6; border-radius:6px; font-size:13px;}
+  .crsOpts select, .crsOpts input[type=text], .crsOpts input[type=file]{
+    width:100%; padding:9px 10px; border:1px solid #c9ced6; border-radius:6px; font-size:13px; background:#fff;}
   .crsOpts .hint{font-size:11px; color:#889; margin-top:4px;}
 </style>
 </head>
@@ -86,22 +86,12 @@
   <div class="crsOpts" id="crsOpts" style="display:none">
     <div class="row">
       <div class="field">
-        <label for="crsReturnCode">Return Code (applies to this whole batch)</label>
-        <select id="crsReturnCode">
-          <option value="">Select return code...</option>
-          <option value="A">A - Approved/Reviewed with no comments</option>
-          <option value="B">B - Approved/Reviewed with minor comments</option>
-          <option value="C">C - Returned with comments</option>
-          <option value="D">D - Rejected</option>
-          <option value="I">I - Information only / No Review</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="crsReviewerGroup">Contractor Reviewer Group (optional)</label>
-        <input type="text" id="crsReviewerGroup" placeholder="e.g. COMP5_STATIC SAIPEM">
+        <label for="crsTracker">Tracker Excel (Document Number + Review Outcome columns)</label>
+        <input type="file" id="crsTracker" accept=".xlsx,.xlsm">
+        <div class="hint" id="crsTrackerName">No file selected.</div>
       </div>
     </div>
-    <div class="hint">Document No., Revision, Document Class and Title are auto-extracted from each PDF's own cover page / filename (…_&lt;REV&gt;.pdf). Review the results below after generating.</div>
+    <div class="hint">Document No., Revision, Document Class and Title are auto-extracted from each PDF's own cover page / filename (…_&lt;REV&gt;.pdf). Return code is looked up per document from the tracker by Document Number. Contractor Reviewer Group is left as the template default - check/set it in the generated file before sending.</div>
   </div>
 
   <div class="dz" id="dz">
@@ -143,8 +133,12 @@ var modeEmbed = document.getElementById('modeEmbed');
 var modeExtract = document.getElementById('modeExtract');
 var modeCrs = document.getElementById('modeCrs');
 var crsOpts = document.getElementById('crsOpts');
-var crsReturnCode = document.getElementById('crsReturnCode');
-var crsReviewerGroup = document.getElementById('crsReviewerGroup');
+var crsTracker = document.getElementById('crsTracker');
+var crsTrackerName = document.getElementById('crsTrackerName');
+crsTracker.onchange = function(){
+  crsTrackerName.textContent = crsTracker.files.length ? crsTracker.files[0].name : 'No file selected.';
+  renderList();
+};
 
 function setMode(m){
   mode = m;
@@ -161,7 +155,6 @@ function setMode(m){
 modeEmbed.onclick = function(){ setMode('embed'); };
 modeExtract.onclick = function(){ setMode('extract'); };
 modeCrs.onclick = function(){ setMode('crs'); };
-crsReturnCode.onchange = function(){ renderList(); };
 
 dz.onclick = function(){ input.click(); };
 dz.addEventListener('dragover', function(e){ e.preventDefault(); dz.classList.add('drag'); });
@@ -195,7 +188,7 @@ function renderList(){
     d.appendChild(n); d.appendChild(s);
     fileList.appendChild(d);
   });
-  goBtn.disabled = files.length === 0 || (mode === 'crs' && !crsReturnCode.value);
+  goBtn.disabled = files.length === 0 || (mode === 'crs' && !crsTracker.files.length);
 }
 
 function clearAll(){
@@ -219,8 +212,7 @@ function processOne(f){
   var url = '/api/process';
   if (mode === 'crs'){
     url = '/api/crs';
-    fd.append('return_code', crsReturnCode.value);
-    fd.append('reviewer_group', crsReviewerGroup.value);
+    fd.append('tracker', crsTracker.files[0], crsTracker.files[0].name);
   } else {
     fd.append('mode', mode);
   }
