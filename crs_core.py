@@ -80,9 +80,12 @@ def extract_cover_page(pdf_bytes: bytes, filename: str):
         raise CrsError(f"{filename}: could not read PDF cover page ({e}).")
 
     doc_no = ""
-    m = re.search(r"COMPANY Document No\.?\s*:?\s*([A-Za-z0-9_\-]+)", text)
+    m = re.search(r"COMPANY Document No\.?\s*:?\s*([^\n]+)", text)
     if m:
-        doc_no = m.group(1).strip()
+        # pypdf sometimes inserts stray spaces inside the number itself
+        # (e.g. "6951 _24-1553653 -00038") from PDF kerning gaps - strip all
+        # internal whitespace rather than stopping at the first one.
+        doc_no = re.sub(r"\s+", "", m.group(1))
 
     doc_class = ""
     m = re.search(r"Document Class\s*:\s*([A-Za-z0-9]+)", text)
@@ -107,6 +110,10 @@ def extract_cover_page(pdf_bytes: bytes, filename: str):
     warnings = []
     if not doc_no:
         warnings.append("Document No. not found on cover page or in filename")
+    elif doc_no_from_name and doc_no.upper() != doc_no_from_name.upper():
+        warnings.append(
+            f"Document No. on cover page ('{doc_no}') doesn't match the filename ('{doc_no_from_name}') - using cover page value, please double-check"
+        )
     if not rev:
         warnings.append("Revision not found in filename (expected …_<REV>.pdf)")
     if not doc_class:
@@ -328,10 +335,10 @@ def build_one(pdf_bytes: bytes, filename: str, tracker_lookup: dict):
     if entry["extra"]:
         detail += " | tracker notes: " + "; ".join(entry["extra"])
     detail += " | ATTENTION: reviewer group (CONTRACTOR REVIEW CODE) left as template default - verify/set manually before sending"
+    # doc_no/rev "not found" cases already raised above and never reach here;
+    # anything left (class/title not found, cover-page/filename mismatch) is new info - show it.
     if info["warnings"]:
-        extra_w = [w for w in info["warnings"] if "Document No" not in w and "Revision" not in w]
-        if extra_w:
-            detail += "; " + "; ".join(extra_w)
+        detail += " | " + "; ".join(info["warnings"])
 
     return zip_name, buf.getvalue(), detail
 
