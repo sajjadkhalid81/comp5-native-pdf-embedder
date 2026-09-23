@@ -69,6 +69,50 @@ def _clean(text):
     return re.sub(r"\s+", " ", text or "").strip()
 
 
+def _looks_like_doc_no(candidate: str) -> bool:
+    """Heuristic sanity check for a Document No. candidate pulled off a cover
+    page. Real COMPANY document numbers in these PDFs are digit/dash/
+    underscore strings (e.g. '6951_24-1554180-00114'); leftover prose
+    (title fragments, discipline names, ...) reads as long runs of letters.
+    Reject anything that looks like prose rather than a code."""
+    if not candidate:
+        return False
+    if not re.search(r"\d", candidate):
+        return False
+    if re.search(r"[A-Za-z]{5,}", candidate):
+        return False
+    if len(candidate) > 40:
+        return False
+    return True
+
+
+def _find_cover_doc_no(text: str) -> str:
+    """Scan the text after the 'COMPANY Document No.' label for the first
+    line/segment that actually looks like a document number, rather than
+    trusting the text immediately after the label - on some PDFs the cover
+    page's column layout puts leftover Document Title text right after that
+    label, with the real number one line further down (see
+    6951_24-1554180-00114_A.pdf: '...COMPANY Document No. : PLAN DRAWING FOR
+    EMERGENCY DIESEL GENERATOR FOR CP4S (540-GD9101)\n: 6951 _24-1554180
+    -00114')."""
+    m = re.search(
+        r"COMPANY Document No\.?\s*:?(.*?)(?:Saipem Document No|Vendor Document No|P\.O\. Number|Discipline\s*:|$)",
+        text,
+        re.S,
+    )
+    if not m:
+        return ""
+    window = m.group(1)
+    for line in re.split(r"[\n:]+", window):
+        # pypdf sometimes inserts stray spaces inside the number itself
+        # (e.g. "6951 _24-1553653 -00038") from PDF kerning gaps - strip all
+        # internal whitespace before checking/using it.
+        candidate = re.sub(r"\s+", "", line)
+        if _looks_like_doc_no(candidate):
+            return candidate
+    return ""
+
+
 def extract_cover_page(pdf_bytes: bytes, filename: str):
     """Pull Document No / Class / Title from the PDF's own cover page,
     and Revision from the filename (…_{REV}.pdf). Read-only - the PDF
@@ -79,13 +123,7 @@ def extract_cover_page(pdf_bytes: bytes, filename: str):
     except Exception as e:
         raise CrsError(f"{filename}: could not read PDF cover page ({e}).")
 
-    doc_no = ""
-    m = re.search(r"COMPANY Document No\.?\s*:?\s*([^\n]+)", text)
-    if m:
-        # pypdf sometimes inserts stray spaces inside the number itself
-        # (e.g. "6951 _24-1553653 -00038") from PDF kerning gaps - strip all
-        # internal whitespace rather than stopping at the first one.
-        doc_no = re.sub(r"\s+", "", m.group(1))
+    cover_doc_no = _find_cover_doc_no(text)
 
     doc_class = ""
     m = re.search(r"Document Class\s*:\s*([A-Za-z0-9]+)", text)
@@ -104,16 +142,24 @@ def extract_cover_page(pdf_bytes: bytes, filename: str):
     if len(parts) == 2 and 0 < len(parts[1]) <= 3 and parts[1].isalnum():
         doc_no_from_name, rev = parts[0], parts[1].upper()
 
-    if not doc_no:
-        doc_no = doc_no_from_name or stem
-
+    # The filename follows Aconex's own naming convention ({DocNo}_{Rev}.pdf)
+    # and has proven far more reliable than cover-page text extraction, which
+    # is fragile across different PDFs' internal layout/column order. So the
+    # filename is the primary source of truth for Document No.; the cover
+    # page is only used as a fallback (filename didn't parse) or to raise a
+    # cross-check warning when the two clearly disagree.
     warnings = []
+    if doc_no_from_name:
+        doc_no = doc_no_from_name
+        if cover_doc_no and cover_doc_no.upper() != doc_no_from_name.upper():
+            warnings.append(
+                f"Document No. on cover page ('{cover_doc_no}') doesn't match the filename ('{doc_no_from_name}') - using filename value, please double-check"
+            )
+    else:
+        doc_no = cover_doc_no or stem
+
     if not doc_no:
         warnings.append("Document No. not found on cover page or in filename")
-    elif doc_no_from_name and doc_no.upper() != doc_no_from_name.upper():
-        warnings.append(
-            f"Document No. on cover page ('{doc_no}') doesn't match the filename ('{doc_no_from_name}') - using cover page value, please double-check"
-        )
     if not rev:
         warnings.append("Revision not found in filename (expected …_<REV>.pdf)")
     if not doc_class:
